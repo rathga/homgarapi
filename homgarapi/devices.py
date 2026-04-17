@@ -1,7 +1,110 @@
 import re
-from typing import List
+import struct
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Tuple
 
 STATS_VALUE_REGEX = re.compile(r'^(\d+)\((\d+)/(\d+)/(\d+)\)')
+
+
+# ---------------------------------------------------------------------------
+# Hex-packed binary TLV decoder for newer firmwares (paramVersion >= ~16).
+#
+# Reverse-engineered from the RainPoint Home APK
+# (com.baldr.homgar.bean.DpDeviceStatus.analyzeDpDeviceStatus). The value
+# looks like "<firmware>#<hex bytes>" with no leading general-status ';'.
+# ---------------------------------------------------------------------------
+
+@dataclass
+class DpRecord:
+    """One TLV record from a Dxx status value."""
+    dp_id: int          # e.g. 25 = STA_WKSTATE port 1 on HTV213FRF/model-288
+    type_code: int      # the dpCode from the productModel catalog
+    type_len: int       # number of payload data bytes (excluding header)
+    payload: bytes      # the payload bytes proper
+
+
+def parse_tlv_d_value(value: str) -> List[DpRecord]:
+    """Parse a single ``Dxx`` status value in the hex-packed TLV format.
+
+    The string ``"11#17E1C2..."`` is composed of an ASCII firmware-version
+    prefix (``11``), a ``#`` separator and the binary payload encoded as hex.
+    Each record is 1 byte of ``dpId`` followed by either:
+
+    * SHORT form (top bit clear): 1 byte header whose bits 6..4 are the
+      ``typeCode`` and whose bits 3..0 are the sole data nibble.
+    * LONG form (top bit set):
+        ``i15 = (h >> 2) & 0x1F`` (extended when 31),
+        ``i16 = h & 3`` → ``typeLen = i16 + 1``,
+        typeCode = ``i15 + 8`` (or ``buf[next] + 39`` when extended),
+        payload spans ``typeLen`` bytes after the header byte.
+
+    Anything after the first ``,`` is ignored — that's a legacy hook the
+    older format used.
+    """
+    comma = value.find(",")
+    if comma != -1:
+        value = value[:comma]
+    if "#" in value:
+        # Strip "<2 chars>#", e.g. "11#".
+        value = value[3:]
+    buf = bytes.fromhex(value)
+
+    out: List[DpRecord] = []
+    i = 0
+    n = len(buf)
+    while i < n:
+        dp_id = buf[i]
+        i += 1
+        if i >= n:
+            break
+        header = buf[i]
+        if (header >> 7) & 1 == 0:
+            # SHORT: single byte, payload is the low nibble.
+            type_code = (header >> 4) & 7
+            payload = bytes([header & 0x0F])
+            type_len = 1
+            i += 1
+        else:
+            i15 = (header >> 2) & 0x1F
+            i16 = header & 3
+            type_len = i16 + 1
+            span = i16 + 2  # header + type_len bytes (overlapping on some)
+            if i15 <= 30:
+                type_code = i15 + 8
+                payload = buf[i + 1:i + span]
+                i += span
+            else:
+                # extended code — next byte is the type code offset
+                i += 1
+                if i >= n:
+                    break
+                type_code = buf[i] + 39
+                payload = buf[i + 1:i + span]
+                i += span
+        out.append(DpRecord(dp_id=dp_id, type_code=type_code,
+                             type_len=type_len, payload=payload))
+    return out
+
+
+def _to_int_le(payload: bytes, signed: bool = False) -> int:
+    if not payload:
+        return 0
+    n = len(payload)
+    if signed:
+        if n == 1:
+            return struct.unpack("<b", payload[:1])[0]
+        if n == 2:
+            return struct.unpack("<h", payload[:2])[0]
+        if n == 4:
+            return struct.unpack("<i", payload[:4])[0]
+        return int.from_bytes(payload, "little", signed=True)
+    if n == 1:
+        return payload[0]
+    if n == 2:
+        return struct.unpack("<H", payload[:2])[0]
+    if n == 4:
+        return struct.unpack("<I", payload[:4])[0]
+    return int.from_bytes(payload, "little")
 
 
 def _parse_stats_value(s):
@@ -33,13 +136,23 @@ class HomgarDevice:
 
     FRIENDLY_DESC = "Unknown HomGar device"
 
-    def __init__(self, model, model_code, name, did, mid, alerts, **kwargs):
+    def __init__(self, model, model_code, name, did, mid, alerts,
+                 device_name=None, product_key=None, iot_id=None, sid=None,
+                 **kwargs):
         self.model = model
         self.model_code = model_code
         self.name = name
         self.did = did  # the unique device identifier of this device itself
         self.mid = mid  # the unique identifier of the sensor network
         self.alerts = alerts
+
+        # Identifiers needed for the control endpoint. Only hubs populate
+        # device_name/product_key but we accept them on all classes so they
+        # flow through kwargs cleanly from get_devices_for_hid.
+        self.device_name = device_name
+        self.product_key = product_key
+        self.iot_id = iot_id
+        self.sid = sid
 
         self.address = None
         self.rf_rssi = None
@@ -286,6 +399,7 @@ class RainPointAirSensor(HomgarSubDevice):
 
 
 class RainPoint2ZoneTimer(HomgarSubDevice):
+    """Legacy 2-Zone Water Timer (paramVersion=2 comma-separated format)."""
     MODEL_CODES = [261]
     FRIENDLY_DESC = "2-Zone Water Timer"
 
@@ -302,13 +416,151 @@ class RainPoint2ZoneTimer(HomgarSubDevice):
         pass
 
 
+# ---------------------------------------------------------------------------
+# Newer-firmware devices: hub HWG023WRF and 2-zone timer HTV213FRF /
+# HTV214FRF (model 288) both use the hex-packed TLV status format and do
+# NOT emit the legacy `<general>;<specific>` prefix.
+# ---------------------------------------------------------------------------
+
+
+# dpCode (aka typeCode) for known identities on HTV213FRF/HTV214FRF, model
+# 288. Per-port statuses come in as records with typeCode==dp_code and
+# dp_id matching the port-specific entry in the productModel catalog.
+_HTV213_DP_CODES = {
+    "STA_RSSI": 32,
+    "STA_BAT": 31,
+    "STA_WKSTATE": 30,
+    "STA_ALARM": 2,
+    "STA_EVTIME": 21,
+    "STA_DURATION": 19,
+    "STA_LASTUSAGE": 15,
+}
+
+# Per-port dpIds for the 2-zone timer (model 288). Port 1 = Sprinklers,
+# port 2 = Dripline by default (from portDescribe in the API).
+_HTV213_PORT_DP_IDS = {
+    1: {
+        "STA_WKSTATE": 25,
+        "STA_ALARM": 29,
+        "STA_EVTIME": 33,
+        "STA_DURATION": 37,
+        "STA_LASTUSAGE": 41,
+    },
+    2: {
+        "STA_WKSTATE": 26,
+        "STA_ALARM": 30,
+        "STA_EVTIME": 34,
+        "STA_DURATION": 38,
+        "STA_LASTUSAGE": 42,
+    },
+}
+
+
+@dataclass
+class ZonePortStatus:
+    """Per-zone state for a multi-port irrigation timer."""
+    port: int
+    wkstate: Optional[int] = None          # bit0=running, other bits flags
+    alarm: Optional[int] = None
+    ev_time: Optional[int] = None          # device-relative event-start
+    duration_s: Optional[int] = None       # requested run duration (seconds)
+    last_usage_dl: Optional[int] = None    # last-cycle usage, units 0.1 L
+
+    @property
+    def running(self) -> bool:
+        return bool(self.wkstate and self.wkstate & 1)
+
+
+class RainPoint2ZoneTimer_V2(HomgarSubDevice):
+    """2-Zone Water Timer on paramVersion>=16 firmware (hex TLV format).
+
+    Models 288 (HTV214FRF / shown as HTV213FRF) and 261 (older HTV213FRF)
+    on new firmware. Port 1 is the 'first' hose output, port 2 the second.
+    """
+
+    MODEL_CODES = [288]
+    FRIENDLY_DESC = "2-Zone Water Timer (v2)"
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.battery_state: Optional[int] = None
+        self.ports: Dict[int, ZonePortStatus] = {
+            1: ZonePortStatus(port=1),
+            2: ZonePortStatus(port=2),
+        }
+        # This device sends its D value without the legacy ';' general prefix,
+        # so we override the general RSSI capture from the TLV stream.
+
+    def _parse_status_d_value(self, val: str) -> None:
+        """Override: new firmware sends the TLV blob directly with no ';'."""
+        records = parse_tlv_d_value(val)
+        for rec in records:
+            self._apply_record(rec)
+
+    def _apply_record(self, rec: DpRecord) -> None:
+        # Shared (non-port-scoped) codes
+        if rec.type_code == _HTV213_DP_CODES["STA_RSSI"]:
+            # 2 bytes come through; firmware treats low byte as signed dBm.
+            self.rf_rssi = _to_int_le(rec.payload[:1], signed=True)
+            return
+        if rec.type_code == _HTV213_DP_CODES["STA_BAT"]:
+            self.battery_state = _to_int_le(rec.payload, signed=False)
+            return
+
+        # Per-port codes — resolve port via dpId lookup
+        for port, ids in _HTV213_PORT_DP_IDS.items():
+            if rec.dp_id != ids.get(self._identity_for(rec.type_code)):
+                continue
+            status = self.ports[port]
+            ident = self._identity_for(rec.type_code)
+            if ident == "STA_WKSTATE":
+                status.wkstate = _to_int_le(rec.payload)
+            elif ident == "STA_ALARM":
+                status.alarm = _to_int_le(rec.payload)
+            elif ident == "STA_EVTIME":
+                status.ev_time = _to_int_le(rec.payload)
+            elif ident == "STA_DURATION":
+                status.duration_s = _to_int_le(rec.payload)
+            elif ident == "STA_LASTUSAGE":
+                status.last_usage_dl = _to_int_le(rec.payload)
+            return
+
+    @staticmethod
+    def _identity_for(type_code: int) -> Optional[str]:
+        for name, code in _HTV213_DP_CODES.items():
+            if code == type_code:
+                return name
+        return None
+
+    def __str__(self) -> str:
+        tail = []
+        for port, s in self.ports.items():
+            state = "RUN" if s.running else "idle"
+            tail.append(f"p{port}={state}/d={s.duration_s}s/u={s.last_usage_dl}")
+        return f"{super().__str__()} [{', '.join(tail)}]"
+
+
+class RainPointDisplayHubV2(HomgarHubDevice):
+    """Newer irrigation hub (HWG023WRF, model 273).
+
+    The hub itself doesn't carry irrigation state — sub-devices do. This class
+    exists mainly so that ``getDeviceByHid`` can produce the right hub type
+    and so downstream HA code can identify the hub model.
+    """
+
+    MODEL_CODES = [273]
+    FRIENDLY_DESC = "Smart+ Irrigation Hub (HWG023WRF)"
+
+
 MODEL_CODE_MAPPING = {
     code: clazz
     for clazz in (
         RainPointDisplayHub,
+        RainPointDisplayHubV2,
         RainPointSoilMoistureSensor,
         RainPointRainSensor,
         RainPointAirSensor,
-        RainPoint2ZoneTimer
+        RainPoint2ZoneTimer,
+        RainPoint2ZoneTimer_V2,
     ) for code in clazz.MODEL_CODES
 }
