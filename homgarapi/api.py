@@ -148,6 +148,7 @@ class HomgarApi:
                 product_key=dev_data.get('productKey'),
                 iot_id=dev_data.get('iotId'),
                 sid=dev_data.get('sid'),
+                port_describe=dev_data.get('portDescribe'),
             )
 
         def get_device_class(dev_data):

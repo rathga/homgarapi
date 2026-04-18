@@ -235,10 +235,20 @@ class HomgarSubDevice(HomgarDevice):
     A subdevice is a device that is associated with a hub.
     It can be a sensor or an actuator.
     """
-    def __init__(self, address, port_number, **kwargs):
+    def __init__(self, address, port_number, port_describe=None, **kwargs):
         super().__init__(**kwargs)
         self.address = address  # device address within the sensor network
         self.port_number = port_number  # the number of ports on the device, e.g. 2 for the 2-zone water timer
+        # Pipe-separated per-port labels from /app/device/getDeviceByHid's
+        # `portDescribe` field (e.g. "Sprinklers|Dripline"). Split lazily.
+        self.port_describe_raw = port_describe or ""
+
+    def port_label(self, port: int) -> str:
+        """Return the user-set label for a port (1-based), or 'Port N'."""
+        labels = [p for p in self.port_describe_raw.split("|") if p]
+        if 1 <= port <= len(labels):
+            return labels[port - 1]
+        return f"Port {port}"
 
     def __str__(self):
         return f"{super().__str__()} at address {self.address}"
