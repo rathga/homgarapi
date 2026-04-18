@@ -44,9 +44,22 @@ class HomgarApi:
         self.cache = auth_cache or {}
         self.base = api_base_url
 
+    #: Headers the current RainPoint Home app (1.16.1057) sends with every
+    #: authenticated request. `appCode=2` replaced `appCode=1` on newer
+    #: firmware — the server rejects `appCode=1` logins from some accounts
+    #: with `code 2001 "Wrong account or password"` even when the password
+    #: is correct. The `version` and `sceneType` values were captured from
+    #: the app and treated as opaque client-identification headers.
+    DEFAULT_HEADERS = {
+        "lang": "en",
+        "appCode": "2",
+        "version": "1.16.1057",
+        "sceneType": "1",
+    }
+
     def _request(self, method, url, with_auth=True, headers=None, **kwargs):
         logger.log(TRACE, "%s %s %s", method, url, kwargs)
-        headers = {"lang": "en", "appCode": "1", **(headers or {})}
+        headers = {**self.DEFAULT_HEADERS, **(headers or {})}
         if with_auth:
             headers["auth"] = self.cache["token"]
         response = self.session.request(method, url, headers=headers, **kwargs)
