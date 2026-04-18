@@ -23,12 +23,22 @@ class DpRecord:
     payload: bytes      # the payload bytes proper
 
 
-def parse_tlv_d_value(value: str) -> List[DpRecord]:
+def parse_tlv_d_value(value: str, has_dpid_prefix: bool = True) -> List[DpRecord]:
     """Parse a single ``Dxx`` status value in the hex-packed TLV format.
 
     The string ``"11#17E1C2..."`` is composed of an ASCII firmware-version
     prefix (``11``), a ``#`` separator and the binary payload encoded as hex.
-    Each record is 1 byte of ``dpId`` followed by either:
+    Each record is either:
+
+    * ``has_dpid_prefix=True`` (HTV213/214 2-zone timer on new firmware):
+      1 byte of ``dpId`` followed by a header byte — the dp_id distinguishes
+      per-port instances of the same dpCode (e.g. STA_WKSTATE on port 1 vs 2).
+    * ``has_dpid_prefix=False`` (HCS012ARF rain sensor on new firmware):
+      records are back-to-back header bytes with no dp_id prefix. The rain
+      sensor only has one instance of each dpCode so the caller can just
+      match on ``type_code``.
+
+    After the dp_id byte (if any) comes:
 
     * SHORT form (top bit clear): 1 byte header whose bits 6..4 are the
       ``typeCode`` and whose bits 3..0 are the sole data nibble.
@@ -53,10 +63,13 @@ def parse_tlv_d_value(value: str) -> List[DpRecord]:
     i = 0
     n = len(buf)
     while i < n:
-        dp_id = buf[i]
-        i += 1
-        if i >= n:
-            break
+        if has_dpid_prefix:
+            dp_id = buf[i]
+            i += 1
+            if i >= n:
+                break
+        else:
+            dp_id = 0
         header = buf[i]
         if (header >> 7) & 1 == 0:
             # SHORT: single byte, payload is the low nibble.
@@ -367,6 +380,19 @@ class RainPointSoilMoistureSensor(HomgarSubDevice):
         return s
 
 
+# Rain sensor (HCS012ARF) dpCodes from the productModel catalog. Unlike the
+# 2-zone timer, each code appears exactly once per payload so we key on
+# type_code alone.
+_HCS012_DP_CODES = {
+    "STA_RSSI": 32,
+    "STA_BAT": 31,
+    "STA_TOTAL_RAIN": 13,
+    "STA_HOUR_RAIN": 43,
+    "STA_DAY_RAIN": 44,
+    "STA_7DAY_RAIN": 45,
+}
+
+
 class RainPointRainSensor(HomgarSubDevice):
     MODEL_CODES = [87]
     FRIENDLY_DESC = "High Precision Rain Sensor"
@@ -376,22 +402,61 @@ class RainPointRainSensor(HomgarSubDevice):
         self.rainfall_mm_total = None
         self.rainfall_mm_hour = None
         self.rainfall_mm_daily = None
-        self.rainfall_mm_total = None
+        self.rainfall_mm_7days = None
+        self.battery_state: Optional[int] = None
 
     def _parse_device_specific_status_d_value(self, s):
-        """
-        Observed example value:
-        R=270(0/0/270)
+        """Auto-detect legacy ``R=...`` vs newer hex-TLV format.
 
-        Deduced meaning:
-        R=total?[.1mm](hour?[.1mm]/24hours?[.1mm]/7days?[.1mm])
+        Legacy firmware emits ``R=270(0/0/270)`` — total/hour/24h/7days in
+        0.1 mm units. Newer firmware emits ``NN#<hex>`` where ``NN`` is a
+        2-char firmware version, with records packed back-to-back (no
+        per-record dp_id prefix — rain sensor has only one instance of each
+        dpCode). See productModel.json entry for HCS012ARF (modelCode 87).
         """
-        self.rainfall_mm_total, self.rainfall_mm_hour, self.rainfall_mm_daily, self.rainfall_mm_7days = [.1*v for v in _parse_stats_value(s[2:])]
+        if s.startswith("R="):
+            self._parse_legacy_stats(s)
+        elif "#" in s:
+            self._parse_tlv_stats(s)
+
+    def _parse_legacy_stats(self, s: str) -> None:
+        """Legacy paramVersion<=2 layout:
+        ``R=total(hour/24h/7days)`` all in 0.1 mm units.
+        """
+        self.rainfall_mm_total, self.rainfall_mm_hour, self.rainfall_mm_daily, self.rainfall_mm_7days = [
+            .1 * v for v in _parse_stats_value(s[2:])
+        ]
+
+    def _parse_tlv_stats(self, s: str) -> None:
+        for rec in parse_tlv_d_value(s, has_dpid_prefix=False):
+            tc = rec.type_code
+            if tc == _HCS012_DP_CODES["STA_RSSI"]:
+                # Firmware reports the low byte as a signed dBm figure.
+                self.rf_rssi = _to_int_le(rec.payload[:1], signed=True)
+            elif tc == _HCS012_DP_CODES["STA_BAT"]:
+                # Enum per productModel: 1 = normal, 3 = low.
+                self.battery_state = _to_int_le(rec.payload)
+            elif tc == _HCS012_DP_CODES["STA_HOUR_RAIN"]:
+                self.rainfall_mm_hour = _to_int_le(rec.payload) * 0.1
+            elif tc == _HCS012_DP_CODES["STA_DAY_RAIN"]:
+                self.rainfall_mm_daily = _to_int_le(rec.payload) * 0.1
+            elif tc == _HCS012_DP_CODES["STA_7DAY_RAIN"]:
+                self.rainfall_mm_7days = _to_int_le(rec.payload) * 0.1
+            elif tc == _HCS012_DP_CODES["STA_TOTAL_RAIN"]:
+                # Running lifetime total. productModel leaves `decimal` unset
+                # but the on-wire unit matches the window counters at 0.1 mm,
+                # consistent with the legacy R=... format's total field.
+                self.rainfall_mm_total = _to_int_le(rec.payload) * 0.1
 
     def __str__(self):
         s = super().__str__()
-        if self.rainfall_mm_total:
-            s += f": {self.rainfall_mm_total}mm total / {self.rainfall_mm_hour}mm 1h / {self.rainfall_mm_daily}mm 24h / {self.rainfall_mm_7days}mm 7days"
+        if self.rainfall_mm_total is not None:
+            s += (
+                f": {self.rainfall_mm_total}mm total / "
+                f"{self.rainfall_mm_hour}mm 1h / "
+                f"{self.rainfall_mm_daily}mm 24h / "
+                f"{self.rainfall_mm_7days}mm 7days"
+            )
         return s
 
 
