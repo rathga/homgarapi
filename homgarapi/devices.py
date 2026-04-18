@@ -184,13 +184,34 @@ class HomgarDevice:
     def _parse_status_d_value(self, val: str) -> None:
         """
         Parses a $.data.subDeviceStatus[x].value field for an entry with ID 'Dxx' where xx is the device address.
-        These fields consist of a common part and a device-specific part separated by a ';'.
-        This call should update the device status.
+
+        Two on-wire formats in the wild:
+
+        * Legacy (paramVersion<=2): ``<general>;<specific>`` where ``<general>``
+          is ``flag,rssi,flag`` (per _parse_general_status_d_value).
+        * Newer (paramVersion>=16): no ``;`` — the whole value is the
+          device-specific blob (typically the hex-TLV format handled by
+          classes like ``RainPoint2ZoneTimer_V2``).
+
+        The parse is wrapped in a try/except so one mis-formatted sub-device
+        doesn't bring down the whole poll — status fields the subclass can't
+        decode are simply ignored.
+
         :param val: Value of the $.data.subDeviceStatus[x].value field to apply
         """
-        general_str, specific_str = val.split(';')
-        self._parse_general_status_d_value(general_str)
-        self._parse_device_specific_status_d_value(specific_str)
+        try:
+            if ';' in val:
+                general_str, specific_str = val.split(';', 1)
+                self._parse_general_status_d_value(general_str)
+            else:
+                specific_str = val
+            self._parse_device_specific_status_d_value(specific_str)
+        except Exception as e:  # noqa: BLE001 — best-effort per sub-device
+            import logging
+            logging.getLogger(__name__).debug(
+                "%s: failed to parse status value %r: %s",
+                type(self).__name__, val, e,
+            )
 
     def _parse_general_status_d_value(self, s: str):
         """
@@ -498,12 +519,12 @@ class RainPoint2ZoneTimer_V2(HomgarSubDevice):
             1: ZonePortStatus(port=1),
             2: ZonePortStatus(port=2),
         }
-        # This device sends its D value without the legacy ';' general prefix,
-        # so we override the general RSSI capture from the TLV stream.
 
-    def _parse_status_d_value(self, val: str) -> None:
-        """Override: new firmware sends the TLV blob directly with no ';'."""
-        records = parse_tlv_d_value(val)
+    def _parse_device_specific_status_d_value(self, s: str):
+        """Newer firmware sends hex-TLV status (``NN#<hex>...``), no ';'
+        separator. The base class _parse_status_d_value passes the whole
+        value through as ``s`` when there is no ';'."""
+        records = parse_tlv_d_value(s)
         for rec in records:
             self._apply_record(rec)
 
