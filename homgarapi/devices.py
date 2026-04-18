@@ -639,13 +639,46 @@ class RainPoint2ZoneTimer_V2(HomgarSubDevice):
 class RainPointDisplayHubV2(HomgarHubDevice):
     """Newer irrigation hub (HWG023WRF, model 273).
 
-    The hub itself doesn't carry irrigation state — sub-devices do. This class
-    exists mainly so that ``getDeviceByHid`` can produce the right hub type
-    and so downstream HA code can identify the hub model.
+    The hub carries no irrigation state of its own — sub-devices do that
+    — but it does report its own Wi-Fi RSSI, internal battery-backup
+    state and connectivity flag via the non-``Dxx`` entries in
+    ``/getDeviceStatus``.
+
+    Observed entries:
+      * ``state``      — ``"<battery_state>,<wifi_rssi_dbm>"`` e.g. ``"0,-81"``
+      * ``connected``  — ``"1"`` while the hub is online, ``"0"`` otherwise
+
+    HWG023WRF is mains-powered so ``battery_state`` is usually 0; it's
+    still exposed in case a different revision populates it.
     """
 
     MODEL_CODES = [273]
     FRIENDLY_DESC = "Smart+ Irrigation Hub (HWG023WRF)"
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.wifi_rssi: Optional[int] = None
+        self.battery_state: Optional[int] = None
+        self.connected: Optional[bool] = None
+
+    def get_device_status_ids(self) -> List[str]:
+        return ["state", "connected"]
+
+    def set_device_status(self, api_obj: dict) -> None:
+        dev_id = api_obj.get('id')
+        val = api_obj.get('value')
+        if val is None:
+            return
+        if dev_id == "state":
+            try:
+                self.battery_state, self.wifi_rssi = [int(s) for s in val.split(',')]
+            except (ValueError, AttributeError):
+                pass
+        elif dev_id == "connected":
+            try:
+                self.connected = int(val) == 1
+            except (ValueError, TypeError):
+                pass
 
 
 MODEL_CODE_MAPPING = {

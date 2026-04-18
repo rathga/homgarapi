@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from homgarapi.devices import (
     RainPoint2ZoneTimer_V2,
+    RainPointDisplayHubV2,
     RainPointRainSensor,
     parse_tlv_d_value,
 )
@@ -135,3 +136,38 @@ def test_rain_sensor_bad_payload_does_not_raise():
     sub = _make_rain_sensor()
     sub._parse_status_d_value("garbage")  # must not raise
     assert sub.rainfall_mm_total is None
+
+
+# --- RainPointDisplayHubV2 (HWG023WRF) -------------------------------------
+
+
+def _make_hub_v2():
+    return RainPointDisplayHubV2(
+        model="HWG023WRF",
+        model_code=273,
+        name="Hub",
+        did=1,
+        mid=148701,
+        alerts=None,
+        subdevices=[],
+    )
+
+
+def test_hub_v2_parses_state_and_connected():
+    hub = _make_hub_v2()
+    # "state" = "<battery>,<rssi_dbm>" — captured verbatim from the API.
+    hub.set_device_status({"id": "state", "value": "0,-81"})
+    hub.set_device_status({"id": "connected", "value": "1"})
+    assert hub.battery_state == 0
+    assert hub.wifi_rssi == -81
+    assert hub.connected is True
+
+
+def test_hub_v2_ignores_null_and_malformed_values():
+    hub = _make_hub_v2()
+    hub.set_device_status({"id": "state", "value": None})       # null
+    hub.set_device_status({"id": "connected", "value": "maybe"})  # garbage
+    # Neither should raise, and neither should populate the field.
+    assert hub.battery_state is None
+    assert hub.wifi_rssi is None
+    assert hub.connected is None
