@@ -57,11 +57,17 @@ class HomgarApi:
         "sceneType": "1",
     }
 
+    # (connect, read) seconds. Without an explicit timeout, a half-open
+    # TCP connection from the HomGar cloud can block the caller forever —
+    # in a DataUpdateCoordinator that means no further polls ever fire.
+    DEFAULT_TIMEOUT = (10, 30)
+
     def _request(self, method, url, with_auth=True, headers=None, **kwargs):
         logger.log(TRACE, "%s %s %s", method, url, kwargs)
         headers = {**self.DEFAULT_HEADERS, **(headers or {})}
         if with_auth:
             headers["auth"] = self.cache["token"]
+        kwargs.setdefault("timeout", self.DEFAULT_TIMEOUT)
         response = self.session.request(method, url, headers=headers, **kwargs)
         logger.log(TRACE, "-[%03d]-> %s", response.status_code, response.text)
         return response
