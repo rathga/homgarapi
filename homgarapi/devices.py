@@ -568,11 +568,12 @@ class ZonePortStatus:
 
 
 class RainPoint2ZoneTimer_V2(HomgarSubDevice):
-    """N-Zone Water Timer on paramVersion>=16 firmware (hex TLV format).
+    """2-Zone Water Timer on paramVersion>=16 firmware (hex TLV format).
 
-    Model 288 (HTV214FRF / shown as HTV213FRF) is the 2-zone variant.
-    Subclasses override PORT_COUNT / PORT_DP_IDS / HAS_DPID_PREFIX for
-    other port counts (e.g. the HTV113FRF 1-zone valve, Task 4).
+    Model 288 (HTV214FRF / shown as HTV213FRF). Also serves as the
+    configurable base class for other port counts — subclasses override
+    PORT_COUNT / PORT_DP_IDS / HAS_DPID_PREFIX (e.g. the HTV113FRF
+    1-zone valve).
     """
 
     MODEL_CODES = [288]
@@ -585,10 +586,15 @@ class RainPoint2ZoneTimer_V2(HomgarSubDevice):
     # per record — there's no ambiguity to resolve, so the firmware drops
     # it. Multi-port timers (HTV213/214) carry a dp_id byte per record
     # so we can distinguish port 1 vs port 2 instances of the same dpCode.
+    # Invariant: ``HAS_DPID_PREFIX`` must be True when ``PORT_COUNT`` > 1.
     HAS_DPID_PREFIX = True
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
+        assert self.HAS_DPID_PREFIX or self.PORT_COUNT == 1, (
+            f"{type(self).__name__}: multi-port device must set HAS_DPID_PREFIX=True; "
+            "without a per-record dp_id byte, port-scoped records cannot be disambiguated."
+        )
         self.battery_state: Optional[int] = None
         self.ports: Dict[int, ZonePortStatus] = {
             p: ZonePortStatus(port=p)
