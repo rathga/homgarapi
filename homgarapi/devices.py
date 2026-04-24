@@ -568,33 +568,43 @@ class ZonePortStatus:
 
 
 class RainPoint2ZoneTimer_V2(HomgarSubDevice):
-    """2-Zone Water Timer on paramVersion>=16 firmware (hex TLV format).
+    """N-Zone Water Timer on paramVersion>=16 firmware (hex TLV format).
 
-    Models 288 (HTV214FRF / shown as HTV213FRF) and 261 (older HTV213FRF)
-    on new firmware. Port 1 is the 'first' hose output, port 2 the second.
+    Model 288 (HTV214FRF / shown as HTV213FRF) is the 2-zone variant.
+    Subclasses override PORT_COUNT / PORT_DP_IDS / HAS_DPID_PREFIX for
+    other port counts (e.g. the HTV113FRF 1-zone valve, Task 4).
     """
 
     MODEL_CODES = [288]
     FRIENDLY_DESC = "2-Zone Water Timer (v2)"
 
+    # --- Overridable class configuration ---
+    PORT_COUNT = 2
+    PORT_DP_IDS = _HTV213_PORT_DP_IDS
+    # Single-port timers (e.g. HTV113FRF) pack status with no dp_id byte
+    # per record — there's no ambiguity to resolve, so the firmware drops
+    # it. Multi-port timers (HTV213/214) carry a dp_id byte per record
+    # so we can distinguish port 1 vs port 2 instances of the same dpCode.
+    HAS_DPID_PREFIX = True
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.battery_state: Optional[int] = None
         self.ports: Dict[int, ZonePortStatus] = {
-            1: ZonePortStatus(port=1),
-            2: ZonePortStatus(port=2),
+            p: ZonePortStatus(port=p)
+            for p in range(1, self.PORT_COUNT + 1)
         }
 
     def _parse_device_specific_status_d_value(self, s: str):
         """Newer firmware sends hex-TLV status (``NN#<hex>...``), no ';'
         separator. The base class _parse_status_d_value passes the whole
         value through as ``s`` when there is no ';'."""
-        records = parse_tlv_d_value(s)
+        records = parse_tlv_d_value(s, has_dpid_prefix=self.HAS_DPID_PREFIX)
         for rec in records:
             self._apply_record(rec)
 
     def _apply_record(self, rec: DpRecord) -> None:
-        # Shared (non-port-scoped) codes
+        # Shared (non-port-scoped) codes — dp_id is irrelevant here.
         if rec.type_code == _HTV213_DP_CODES["STA_RSSI"]:
             # 2 bytes come through; firmware treats low byte as signed dBm.
             self.rf_rssi = _to_int_le(rec.payload[:1], signed=True)
@@ -603,23 +613,40 @@ class RainPoint2ZoneTimer_V2(HomgarSubDevice):
             self.battery_state = _to_int_le(rec.payload, signed=False)
             return
 
-        # Per-port codes — resolve port via dpId lookup
-        for port, ids in _HTV213_PORT_DP_IDS.items():
-            if rec.dp_id != ids.get(self._identity_for(rec.type_code)):
-                continue
-            status = self.ports[port]
-            ident = self._identity_for(rec.type_code)
-            if ident == "STA_WKSTATE":
-                status.wkstate = _to_int_le(rec.payload)
-            elif ident == "STA_ALARM":
-                status.alarm = _to_int_le(rec.payload)
-            elif ident == "STA_EVTIME":
-                status.ev_time = _to_int_le(rec.payload)
-            elif ident == "STA_DURATION":
-                status.duration_s = _to_int_le(rec.payload)
-            elif ident == "STA_LASTUSAGE":
-                status.last_usage_dl = _to_int_le(rec.payload)
+        # Per-port codes
+        ident = self._identity_for(rec.type_code)
+        if ident is None:
             return
+
+        if self.HAS_DPID_PREFIX:
+            # Multi-port: the dp_id byte disambiguates port 1 vs port 2
+            # instances of the same dpCode. Match on (dp_id, identity).
+            for port, ids in self.PORT_DP_IDS.items():
+                if rec.dp_id == ids.get(ident):
+                    self._apply_to_port(port, ident, rec.payload)
+                    return
+        else:
+            # Single-port: no dp_id in the wire format (rec.dp_id is 0).
+            # The identity alone tells us which port-scoped field to set;
+            # since there's only one port, apply to the first port whose
+            # PORT_DP_IDS contains this identity.
+            for port, ids in self.PORT_DP_IDS.items():
+                if ident in ids:
+                    self._apply_to_port(port, ident, rec.payload)
+                    return
+
+    def _apply_to_port(self, port: int, ident: str, payload: bytes) -> None:
+        status = self.ports[port]
+        if ident == "STA_WKSTATE":
+            status.wkstate = _to_int_le(payload)
+        elif ident == "STA_ALARM":
+            status.alarm = _to_int_le(payload)
+        elif ident == "STA_EVTIME":
+            status.ev_time = _to_int_le(payload)
+        elif ident == "STA_DURATION":
+            status.duration_s = _to_int_le(payload)
+        elif ident == "STA_LASTUSAGE":
+            status.last_usage_dl = _to_int_le(payload)
 
     @staticmethod
     def _identity_for(type_code: int) -> Optional[str]:
