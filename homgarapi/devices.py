@@ -669,6 +669,36 @@ class RainPoint2ZoneTimer_V2(HomgarSubDevice):
         return f"{super().__str__()} [{', '.join(tail)}]"
 
 
+# Per-port dpIds for the 1-zone mains-top-up valve (model 259). From
+# productModel catalog capture 2026-04-24 (api-sniffing). Port-1 entries
+# match HTV213FRF port 1 exactly — the two devices share identities.
+_HTV113_PORT_DP_IDS = {
+    1: {
+        "STA_WKSTATE":   25,
+        "STA_ALARM":     29,
+        "STA_EVTIME":    33,
+        "STA_DURATION":  37,
+        "STA_LASTUSAGE": 41,
+    },
+}
+
+
+class RainPoint1ZoneTimer_V2(RainPoint2ZoneTimer_V2):
+    """1-Zone Water Timer on paramVersion>=16 firmware (hex TLV format).
+
+    Model 259 — HTV113FRF, a single-port valve used e.g. as a rainwater-
+    tank mains top-up. Shares all dp identities with the 2-zone model
+    but wire-formats its status with no per-record dp_id byte (the
+    ``10#`` prefix, vs the 2-zone's ``11#`` + dp_id pattern).
+    """
+
+    MODEL_CODES = [259]
+    FRIENDLY_DESC = "1-Zone Water Timer (v2)"
+    PORT_COUNT = 1
+    PORT_DP_IDS = _HTV113_PORT_DP_IDS
+    HAS_DPID_PREFIX = False
+
+
 class RainPointDisplayHubV2(HomgarHubDevice):
     """Newer irrigation hub (HWG023WRF, model 273).
 
@@ -724,5 +754,6 @@ MODEL_CODE_MAPPING = {
         RainPointAirSensor,
         RainPoint2ZoneTimer,
         RainPoint2ZoneTimer_V2,
+        RainPoint1ZoneTimer_V2,
     ) for code in clazz.MODEL_CODES
 }
