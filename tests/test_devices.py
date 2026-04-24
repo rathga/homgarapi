@@ -90,6 +90,54 @@ def test_v2_timer_decodes_captured_d01():
     assert sub.ports[2].last_usage_dl == 0
 
 
+# --- RainPoint1ZoneTimer_V2 (HTV113FRF) -----------------------------------
+
+
+def test_v2_1zone_timer_decodes_captured_payload():
+    """HTV113FRF — single-zone mains top-up valve, paramVersion>=16 TLV.
+
+    Payload captured 2026-04-24 from the live hub while the valve was
+    idle (see api-sniffing/notes/htv113frf-probe-2026-04-24.md). Key
+    distinction from the 2-zone model: the `10#` wire prefix carries
+    NO dp_id byte per record (unlike the 2-zone's `11#`), matching the
+    HCS012ARF rain sensor packing rather than the HTV213/214 one.
+    Exercises the RainPoint1ZoneTimer_V2 subclass's HAS_DPID_PREFIX=False
+    dispatch path through the parent class.
+    """
+    from homgarapi.devices import RainPoint1ZoneTimer_V2
+
+    value = "10#E1C000DC01D80020B700000000AD00009F93020000FF0F87412F19"
+    sub = RainPoint1ZoneTimer_V2(
+        model="HTV113FRF",
+        model_code=259,
+        name="Tank Topup",
+        did=3,
+        mid=148701,
+        alerts=None,
+        address=3,
+        port_number=1,
+    )
+    sub._parse_device_specific_status_d_value(value)
+
+    # Exactly one port exists (PORT_COUNT=1 on this subclass).
+    assert set(sub.ports.keys()) == {1}
+
+    # Device-wide
+    assert sub.rf_rssi == -64            # low byte of 0xC000 as signed = -64 dBm
+    assert sub.battery_state == 1        # normal
+
+    # Port 1 — all per-port identities must be parsed via the
+    # HAS_DPID_PREFIX=False dispatch branch (which picks port 1 from the
+    # identity alone). Including multiple ports' identities to confirm
+    # the dispatch actually routes each one, not just the first.
+    p = sub.ports[1]
+    assert p.wkstate == 0                # idle (bit0 = running, 0 = off)
+    assert p.alarm == 0                  # short-form record, low-nibble=0
+    assert p.ev_time == 0
+    assert p.duration_s == 0
+    assert p.last_usage_dl == 659        # 0.1 L units → 65.9 L last cycle
+
+
 # --- RainPointRainSensor ---------------------------------------------------
 
 
