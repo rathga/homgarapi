@@ -138,6 +138,52 @@ def test_v2_1zone_timer_decodes_captured_payload():
     assert p.last_usage_dl == 659        # 0.1 L units → 65.9 L last cycle
 
 
+# --- port_label fallback rules --------------------------------------------
+
+
+def test_port_label_multi_port_with_describe():
+    sub = RainPoint2ZoneTimer_V2(
+        model="HTV213FRF", model_code=288, name="Timer", did=1,
+        mid=148701, alerts=None, address=1, port_number=2,
+        port_describe="Sprinklers|Dripline",
+    )
+    assert sub.port_label(1) == "Sprinklers"
+    assert sub.port_label(2) == "Dripline"
+
+
+def test_port_label_multi_port_without_describe_uses_port_n():
+    sub = RainPoint2ZoneTimer_V2(
+        model="HTV213FRF", model_code=288, name="Timer", did=1,
+        mid=148701, alerts=None, address=1, port_number=2,
+        port_describe="",
+    )
+    assert sub.port_label(1) == "Port 1"
+    assert sub.port_label(2) == "Port 2"
+
+
+def test_port_label_single_port_without_describe_is_empty():
+    """For 1-zone devices the helper returns "" so callers can render
+    entity names from the device label alone (HTV113FRF in the wild
+    surfaces its identity at the device level only — no portDescribe)."""
+    from homgarapi.devices import RainPoint1ZoneTimer_V2
+    sub = RainPoint1ZoneTimer_V2(
+        model="HTV113FRF", model_code=259, name="Tank Topup", did=3,
+        mid=148701, alerts=None, address=3, port_number=1,
+        port_describe="",
+    )
+    assert sub.port_label(1) == ""
+
+
+def test_port_label_single_port_with_describe_uses_describe():
+    from homgarapi.devices import RainPoint1ZoneTimer_V2
+    sub = RainPoint1ZoneTimer_V2(
+        model="HTV113FRF", model_code=259, name="Tank Topup", did=3,
+        mid=148701, alerts=None, address=3, port_number=1,
+        port_describe="Mains top-up",
+    )
+    assert sub.port_label(1) == "Mains top-up"
+
+
 # --- RainPointRainSensor ---------------------------------------------------
 
 

@@ -278,10 +278,23 @@ class HomgarSubDevice(HomgarDevice):
         self.port_describe_raw = port_describe or ""
 
     def port_label(self, port: int) -> str:
-        """Return the user-set label for a port (1-based), or 'Port N'."""
+        """Return the user-set label for a port (1-based), or a fallback.
+
+        Fallback rules:
+          * Multi-port device (port_number > 1): ``"Port N"`` so each
+            port is distinguishable in HA's UI.
+          * Single-port device (port_number == 1) with no portDescribe:
+            empty string. Callers can check truthiness to decide between
+            "render as device-only" (e.g. a switch) and "drop the
+            redundant prefix" (e.g. ``f"{label} running".strip()``).
+            Single-port devices in the wild (HTV113FRF) often surface
+            their identity at the device level only.
+        """
         labels = [p for p in self.port_describe_raw.split("|") if p]
         if 1 <= port <= len(labels):
             return labels[port - 1]
+        if self.port_number == 1:
+            return ""
         return f"Port {port}"
 
     def __str__(self):
