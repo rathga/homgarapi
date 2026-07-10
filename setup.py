@@ -12,16 +12,17 @@ long_description = (this_directory / "README.md").read_text()
 version = os.environ.get('GITHUB_REF_NAME') or '0.0.0+local'
 
 setup(
-    name='homgarapi',
+    name='homgarapi-rathga',
     version=version,
-    description='HomGar API client',
+    description='HomGar API client (rathga fork: HWG023WRF hub + model-288 timer control + hex-TLV decode)',
     long_description=long_description,
     long_description_content_type='text/markdown',
-    keywords=['homgar'],
-    url='https://github.com/Remboooo/homgarapi',
-    download_url=f"https://github.com/Remboooo/homgarapi/archive/refs/tags/{version}.tar.gz",
+    keywords=['homgar', 'rainpoint', 'homeassistant'],
+    url='https://github.com/rathga/homgarapi',
+    download_url=f"https://github.com/rathga/homgarapi/archive/refs/tags/{version}.tar.gz",
     author='Rembrand van Lakwijk',
     author_email='rem@lakwijk.com',
+    maintainer='rathga',
     license='MIT',
     packages=['homgarapi'],
     install_requires=[
